@@ -18,7 +18,7 @@ permissions: read-all
 
 jobs:
   download-OpenCL-Clang: # openCL Clang is downloaded from intel/intel-graphics-compiler releases
-    if: github.repository == 'intel/intel-graphics-compiler'
+    if: github.repository == 'michalkr52/intel-graphics-compiler'
     runs-on: ubuntu-latest
     env:
       CLANG_CACHE_VALID: true
@@ -74,7 +74,7 @@ jobs:
           restore-keys: ${{ env.ORIGINAL_CLANG_CACHE_KEY }}
 
   build-SPIRV-LLVM-Translator:
-    if: github.repository == 'intel/intel-graphics-compiler'
+    if: github.repository == 'michalkr52/intel-graphics-compiler'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -121,7 +121,7 @@ jobs:
 
   build-IGC:
     needs: [build-SPIRV-LLVM-Translator, download-OpenCL-Clang]
-    if: github.repository == 'intel/intel-graphics-compiler'
+    if: github.repository == 'michalkr52/intel-graphics-compiler'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
