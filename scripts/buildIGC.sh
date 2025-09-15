@@ -27,7 +27,7 @@ if [ -z ${LLVM_VERSION+x} ]; then
     echo "[Build Status] LLVM_VERSION is unset, use default 14";
     LLVM_VERSION="16"
 else
-    echo "[Build Status] LLVM_VERSION = ${LLVM_VERSION}"
+    echo "[Build Status] LLVM_VERSION = ${LLVM_VERSION}" 
 fi
 if [ -z ${COMPILER+x} ]; then
     echo "[Build Status] COMPILER is unset, use default gcc";
