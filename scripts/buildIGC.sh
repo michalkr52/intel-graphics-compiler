@@ -113,7 +113,7 @@ mkdir build && cd build
 cmake ../ $CONFIG_VARS
 echo "[Build Status] Cmake created"
 
-make -j`nproc`
+make VERBOSE=1 -j`nproc`
 echo "[Build Status] make DONE"
 cpack
 mkdir DEB-FILES && mv ./*.deb ./DEB-FILES
