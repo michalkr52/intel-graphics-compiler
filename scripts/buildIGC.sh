@@ -76,7 +76,7 @@ fi
 apt-get install -y llvm-"$LLVM_VERSION" llvm-"$LLVM_VERSION"-dev clang-"$LLVM_VERSION" liblld-"$LLVM_VERSION" liblld-"$LLVM_VERSION"-dev
 echo "[Build Status] LLVM INSTALLED"
 
-LLVM_VERSION_PREFERRED="$LLVM_VERSION".0.0
+LLVM_VERSION_PREFERRED="$LLVM_VERSION".0.6
 echo "[Build Status] LLVM_VERSION_PREFERRED = $LLVM_VERSION_PREFERRED"
 
 echo "[Build Status] Prepare install OpenCL Clang"
