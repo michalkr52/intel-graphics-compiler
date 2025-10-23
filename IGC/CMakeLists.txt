@@ -35,7 +35,7 @@ if(NOT DEFINED IGC_API_MAJOR_VERSION)
   set(IGC_API_MAJOR_VERSION 2)
 endif()
 if(NOT DEFINED IGC_API_MINOR_VERSION)
-  set(IGC_API_MINOR_VERSION 20)
+  set(IGC_API_MINOR_VERSION 22)
 endif()
 if(NOT DEFINED IGC_API_PATCH_VERSION)
   set(IGC_API_PATCH_VERSION 0)
@@ -270,16 +270,10 @@ if (FCL_ENABLED)
   unset(_allowBifLink)
 endif()
 
-# TODO: Remove this flag once only LLVM 16+ is supported (no possibility to enable typed pointers).
-if(IGC_OPTION__LLVM_PREFERRED_VERSION VERSION_GREATER_EQUAL 16)
-  option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "[Experimental] Enable opaque pointers across the IGC stack.\
-    Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode.\
-    Enabled by default for LLVM 16+." ON)
-else()
-  option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "[Experimental] Enable opaque pointers across the IGC stack.\
-    Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode.\
-    Enabled by default for LLVM 16+." OFF)
-endif()
+# By default IGC uses typed pointers. When IGC will be switched to opaque we should change it to "ON" for LLVM 16
+option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "Enable opaque pointers across the IGC stack.\
+  Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode.\
+  Disabled by default for LLVM 16 and older." OFF)
 
 option(IGC_OPTION__ENABLE_LIT_TESTS "Enable lit testing for IGC compiler. May require additional tools like llvm lit and opt" OFF)
 
@@ -302,7 +296,7 @@ endif()
 
 
 set(IGC_OPTION__IST_IGCC_ONLY ON CACHE BOOL
-    "Only building igcc part of IST (IGCStandalone).")
+    "Only building igcc part of IGCStandalone.")
 
 if(NOT DEFINED IGC_OPTION__BUILD_IGC_OPT)
     set(IGC_OPTION__BUILD_IGC_OPT OFF)
@@ -1533,9 +1527,6 @@ igc_sg_define(IGC__common)
 igc_sg_define(IGC__Common_CLElfLib)
 
 
-# Add protobuf
-include(igc_find_protobuf)
-
 set(IGC_BUILD__SPIRV_TOOLS_ENABLED ON)
 
 if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
@@ -1636,9 +1627,6 @@ if(MSVC)
   )
 endif()
 
-#Metrcis
-include(Metrics/protobuf_metrics.cmake)
-
 # Sources/headers for main libraries.
 set(IGC_BUILD__SRC__IGC__igc_common
     ${IGC_BUILD__SRC__IGC_AdaptorOCL}
@@ -1717,12 +1705,8 @@ if(UNIX)
       DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
-  if(TARGET ${IGC_BUILD__PROJ__AdaptorDx10})
-      set(IGC_BUILD__PROJ_DX10_LIBRARY_NAME "$<TARGET_FILE:${IGC_BUILD__PROJ__AdaptorDx10}>")
-  endif()
-
-  if(TARGET ${IGC_BUILD__PROJ__AdaptorDXIL})
-      set(IGC_BUILD__PROJ_DXIL_LIBRARY_NAME "$<TARGET_FILE:${IGC_BUILD__PROJ__AdaptorDXIL}>")
+  if(TARGET ${IGC_BUILD__PROJ__AdaptorDX})
+      set(IGC_BUILD__PROJ_DXIL_LIBRARY_NAME "$<TARGET_FILE:${IGC_BUILD__PROJ__AdaptorDX}>")
   endif()
 
   if(TARGET ${IGC_BUILD__PROJ__BiFLib_OCL})
@@ -1744,6 +1728,11 @@ if(UNIX)
   #Using just created linker script from add_custom_command
   target_link_libraries("${IGC_BUILD__PROJ__igc_dll}" PRIVATE -Wl,--version-script="${IGC_BUILD__PROJ_LINKER_SCRIPT_FULL_PATH}")
 
+endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+    CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    link_libraries(stdc++fs)
 endif()
 
 if(IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR)
@@ -1902,10 +1891,6 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
     )
   endif()
 
-  #Metrics
-  list(APPEND _targetLinkLineCommon
-      igc_metric
-  )
 
 list(APPEND _targetLinkLineCommon zebinlib)
 list(APPEND _targetLinkLineCommon IGCOptions)

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2022-2024 Intel Corporation
+Copyright (C) 2022-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -325,7 +325,7 @@ Type *PromoteBools::getOrCreatePromotedType(Type *type) {
     // types do not have this problem.
     if (typeNeedsPromotion(structType)) {
       // Create an opaque type to handle recursive types
-      auto name = structType->hasName() ? structType->getName().str() : "";
+      const auto &name = structType->hasName() ? structType->getName().str() : "";
       structType->setName(name + ".unpromoted");
 
       auto newStructType = StructType::create(type->getContext(), name);
@@ -440,8 +440,18 @@ Value *PromoteBools::getOrCreatePromotedValue(Value *value) {
 
   if (newValue != value) {
     promotedValuesCache[value] = newValue;
-    auto ty = value->getType();
-    if (!IGCLLVM::isOpaquePointerTy(ty) && ty == newValue->getType()) {
+
+    bool promotionChangedType = false;
+    auto oldGV = dyn_cast<GlobalValue>(value);
+    auto newGV = dyn_cast<GlobalValue>(newValue);
+
+    if (oldGV && newGV) {
+      promotionChangedType = oldGV->getValueType() != newGV->getValueType();
+    }
+
+    bool typesMatch = (value->getType() == newValue->getType());
+
+    if (!promotionChangedType && typesMatch) {
       value->replaceAllUsesWith(newValue);
     } else {
       for (const auto &user : value->users()) {

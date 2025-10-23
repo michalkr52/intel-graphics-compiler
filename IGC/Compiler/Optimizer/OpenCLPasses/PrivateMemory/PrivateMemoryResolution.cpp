@@ -193,9 +193,8 @@ void PrivateMemoryResolution::expandPrivateMemoryForVla(uint32_t &maxPrivateMem)
       "You can change this size by setting environmental variable IGC_ForcePerThreadPrivateMemorySize to a value in "
       "range [1024:20480]. "
       "Greater values can affect performance, and lower ones may lead to incorrect results of your program.\n"
-      "To make sure your program runs correctly you can set environmental variable IGC_StackOverflowDetection=1. "
-      "This flag will print \"Stack overflow detected!\" if insufficient memory value has led to stack overflow. "
-      "It should be used for debugging only as it affects performance.";
+      "To make sure your program runs correctly you can use IGC_StackOverflowDetection feature. See documentation:\n"
+      "https://github.com/intel/intel-graphics-compiler/tree/master/documentation/igc/StackOverflowDetection/StackOverflowDetection.md";
 
   getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->EmitWarning(fullWarningMessage.c_str());
 }
@@ -369,6 +368,17 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module &M) {
       if (FG->hasStackCall()) {
         // Analyze call depth for stack memory required
         maxPrivateMem = AnalyzeCGPrivateMemUsage(pKernel);
+        std::string maxPrivateMemValue = std::to_string(maxPrivateMem);
+        std::string fullWarningMessage =
+          "Stack call has been detected, the private memory size is set to " + maxPrivateMemValue +
+          "B. "
+          "You can change this size by setting environmental variable IGC_ForcePerThreadPrivateMemorySize to a value in "
+          "range [1024:20480]. "
+          "Greater values can affect performance, and lower ones may lead to incorrect results of your program.\n"
+          "To make sure your program runs correctly you can use StackOverflowDetection feature. See documentation:\n"
+          "https://github.com/intel/intel-graphics-compiler/tree/master/documentation/igc/StackOverflowDetection/StackOverflowDetection.md";
+
+        getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->EmitWarning(fullWarningMessage.c_str());
       }
       if (((FG->hasIndirectCall() && FG->hasPartialCallGraph()) || FG->hasRecursion()) &&
           Ctx.type != ShaderType::RAYTRACING_SHADER) {
@@ -995,7 +1005,6 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack) {
           }
         }
       }
-      Ctx.metrics.UpdateVariable(pAI, privateBuffer);
       // Replace all uses of original alloca with the bitcast
       pAI->replaceAllUsesWith(privateBuffer);
       pAI->eraseFromParent();
@@ -1149,14 +1158,12 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack) {
       // Replace all uses of original alloca with the bitcast
       Value *privateBuffer =
           builder.CreatePointerCast(privateBufferPTR, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
-      Ctx.metrics.UpdateVariable(pAI, privateBuffer);
       pAI->replaceAllUsesWith(privateBuffer);
       pAI->eraseFromParent();
 
       if (scratchMemoryAddressSpace == ADDRESS_SPACE_GLOBAL) {
         // Fix address space in uses of privateBufferPTR, ADDRESS_SPACE_PRIVATE => ADDRESS_SPACE_GLOBAL
         FixAddressSpaceInAllUses(privateBufferPTR, ADDRESS_SPACE_GLOBAL, ADDRESS_SPACE_PRIVATE);
-        Ctx.metrics.UpdateVariable(privateBuffer, privateBufferPTR);
         privateBuffer->replaceAllUsesWith(privateBufferPTR);
         if (Instruction *inst = dyn_cast<Instruction>(privateBuffer)) {
           inst->eraseFromParent();
@@ -1294,7 +1301,6 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack) {
     }
 
     // Replace all uses of original alloca with the bitcast
-    Ctx.metrics.UpdateVariable(pAI, privateBuffer);
     pAI->replaceAllUsesWith(privateBuffer);
     pAI->eraseFromParent();
   }

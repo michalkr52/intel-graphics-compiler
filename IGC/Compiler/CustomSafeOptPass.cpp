@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2024 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -71,6 +71,7 @@ cmp+sel to avoid expensive VxH mov.
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/ConstantFolding.h>
 #include <llvm/Analysis/InstructionSimplify.h>
+#include <llvm/Analysis/LoopInfo.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
 #include "llvm/IR/DebugInfo.h"
@@ -395,7 +396,7 @@ void CustomSafeOptPass::mergeDotAddToDp4a(llvm::CallInst *I) {
   };
 
   // found %id213- = call i32 @llvm.genx.GenISA.dp4a.ss.i32(i32 0, i32 %305, i32 %345)
-  GenIntrinsicInst *instr = dyn_cast<GenIntrinsicInst>(I);
+  GenIntrinsicInst *instr = cast<GenIntrinsicInst>(I);
 
   if (ConstantInt *CI = dyn_cast<ConstantInt>(instr->getOperand(0))) {
     // make sure operand(0) value is (i32 0)
@@ -468,6 +469,81 @@ static bool isTruncInvariant(unsigned Opcode) {
     return true;
   default:
     return false;
+  }
+}
+
+// Check and convert atomic_iadd with immediate 1/-1 to atomic_inc/dec
+void CustomSafeOptPass::visitIntAtomicIAddToIncOrDec(CallInst *I) {
+
+  if (m_modMD->compOpt.DisableConvertingAtomicIAddToIncDec)
+    return;
+
+  GenIntrinsicInst *instr = cast<GenIntrinsicInst>(I);
+  GenISAIntrinsic::ID id = instr->getIntrinsicID();
+
+// clang-format off
+// In AtomicTyped, convert EATOMIC_IADD(0) to EATOMIC_INC(2) and EATOMIC_DEC(3) when value of 1 is used as increment or -1 as decrement
+// From:
+// %7 = call i32 @llvm.genx.GenISA.intatomictyped.i32.p2490368__Buffer_Typed_DIM_Resource(%__Buffer_Typed_DIM_Resource addrspace(2490368)* %u01, i32 %ThreadID_X, i32 undef, i32 undef, i32 1, i32 0)
+// %8 = call i32 @llvm.genx.GenISA.intatomictyped.i32.p2490368__Buffer_Typed_DIM_Resource(%__Buffer_Typed_DIM_Resource addrspace(2490368)* %u01, i32 %ThreadID_X, i32 undef, i32 undef, i32 -1, i32 0)
+// To:
+// %7 = call i32 @llvm.genx.GenISA.intatomictyped.i32.p2490368__Buffer_Typed_DIM_Resource(%__Buffer_Typed_DIM_Resource addrspace(2490368)* %u01, i32 %ThreadID_X, i32 undef, i32 undef, i32 poison, i32 2)
+// %8 = call i32 @llvm.genx.GenISA.intatomictyped.i32.p2490368__Buffer_Typed_DIM_Resource(%__Buffer_Typed_DIM_Resource addrspace(2490368)* %u01, i32 %ThreadID_X, i32 undef, i32 undef, i32 poison, i32 3)
+// clang-format on
+  if (id == GenISAIntrinsic::GenISA_intatomictyped) {
+    // for immediate 1 or -1
+    if (auto *constInt1 = llvm::dyn_cast<llvm::ConstantInt>(instr->getOperand(4))) {
+      // for atomic_iadd
+      if (auto *constInt2 = llvm::dyn_cast<llvm::ConstantInt>(instr->getOperand(5))) {
+        if (AtomicOp::EATOMIC_IADD == constInt2->getZExtValue()) {
+          if (constInt1->getSExtValue() == 1) {
+            instr->setOperand(5, llvm::ConstantInt::get(instr->getOperand(5)->getType(), AtomicOp::EATOMIC_INC));
+            instr->setOperand(4, PoisonValue::get(constInt1->getType()));
+          } else if (constInt1->getSExtValue() == -1) {
+            instr->setOperand(5, llvm::ConstantInt::get(instr->getOperand(5)->getType(), AtomicOp::EATOMIC_DEC));
+            instr->setOperand(4, PoisonValue::get(constInt1->getType()));
+          }
+        }
+      }
+    }
+    return;
+  }
+
+// clang-format off
+// In AtomicRaw or AtomicRawA64, convert EATOMIC_IADD(0) to EATOMIC_INC(2) and EATOMIC_DEC(3) when value of 1 is used as increment or -1 as decrement
+// From:
+// %10 = call i32 @llvm.genx.GenISA.intatomicraw.i32.p2490369v4f32(<4 x float> addrspace(2490369)* %u0, i32 %9, i32 1, i32 0)
+// %11 = call i32 @llvm.genx.GenISA.intatomicraw.i32.p2490369v4f32(<4 x float> addrspace(2490369)* %u0, i32 %9, i32 -1, i32 0)
+// or
+// %13 = call i32 @llvm.genx.GenISA.intatomicrawA64.i32.p3i32.p3i32(i32 addrspace(3)* %12, i32 addrspace(3)* %12, i32 1, i32 0)
+// %14 = call i32 @llvm.genx.GenISA.intatomicrawA64.i32.p3i32.p3i32(i32 addrspace(3)* %12, i32 addrspace(3)* %12, i32 -1, i32 0)
+// To:
+// %10 = call i32 @llvm.genx.GenISA.intatomicraw.i32.p2490369v4f32(<4 x float> addrspace(2490369)* %u0, i32 %9, i32 poison, i32 2)
+// %11 = call i32 @llvm.genx.GenISA.intatomicraw.i32.p2490369v4f32(<4 x float> addrspace(2490369)* %u0, i32 %9, i32 poison, i32 3)
+// or
+// %13 = call i32 @llvm.genx.GenISA.intatomicrawA64.i32.p3i32.p3i32(i32 addrspace(3)* %12, i32 addrspace(3)* %12, i32 poison, i32 2)
+// %14 = call i32 @llvm.genx.GenISA.intatomicrawA64.i32.p3i32.p3i32(i32 addrspace(3)* %12, i32 addrspace(3)* %12, i32 poison, i32 3)
+// clang-format on
+  if (id == GenISAIntrinsic::GenISA_intatomicraw || id == GenISAIntrinsic::GenISA_intatomicrawA64) {
+    if (instr->getOperand(0)->getType()->getPointerAddressSpace() == ADDRESS_SPACE_LOCAL)
+      return;
+
+    // for immediate 1 or -1
+    if (auto *constInt1 = llvm::dyn_cast<llvm::ConstantInt>(instr->getOperand(2))) {
+      // for atomic_iadd
+      if (auto *constInt2 = llvm::dyn_cast<llvm::ConstantInt>(instr->getOperand(3))) {
+        if (AtomicOp::EATOMIC_IADD == constInt2->getZExtValue()) {
+          if (constInt1->getSExtValue() == 1) {
+            instr->setOperand(3, llvm::ConstantInt::get(instr->getOperand(3)->getType(), AtomicOp::EATOMIC_INC));
+            instr->setOperand(2, PoisonValue::get(constInt1->getType()));
+          } else if (constInt1->getSExtValue() == -1) {
+            instr->setOperand(3, llvm::ConstantInt::get(instr->getOperand(3)->getType(), AtomicOp::EATOMIC_DEC));
+            instr->setOperand(2, PoisonValue::get(constInt1->getType()));
+          }
+        }
+      }
+    }
+    return;
   }
 }
 
@@ -834,6 +910,15 @@ void CustomSafeOptPass::visitCallInst(CallInst &C) {
 
     case GenISAIntrinsic::GenISA_LSC2DBlockPrefetch: {
       visitLSC2DBlockPrefetch(inst);
+      break;
+    }
+
+    case GenISAIntrinsic::GenISA_intatomictyped:
+    case GenISAIntrinsic::GenISA_intatomicraw:
+    case GenISAIntrinsic::GenISA_intatomicrawA64: {
+      if (pContext->m_DriverInfo.supportsAtomicIaddToIncDec()) {
+        visitIntAtomicIAddToIncOrDec(inst);
+      }
       break;
     }
 
@@ -2158,6 +2243,53 @@ void CustomSafeOptPass::dp4WithIdentityMatrix(ExtractElementInst &I) {
     addI[2]->replaceAllUsesWith(builder.CreateFNeg(sel3));
   else
     addI[2]->replaceAllUsesWith(builder.CreateNeg(sel3));
+}
+
+// Check if a new vector is constructed, and if so, replace operand in first insert to undef. This optimization is
+// similar to LLVM instcombine pass (InstCombinerImpl::SimplifyDemandedVectorElts). LLVM optimization is limited to
+// short vectors, where IGC must support larger vectors (16, 32 elements).
+void CustomSafeOptPass::visitInsertElementInst(llvm::InsertElementInst &I) {
+  using namespace llvm::PatternMatch;
+
+  auto *VType = dyn_cast<IGCLLVM::FixedVectorType>(I.getType());
+  if (!VType)
+    return;
+
+  auto VWidth = VType->getNumElements();
+  auto ElSize = VType->getElementType()->getPrimitiveSizeInBits();
+
+  // Optimize only vectors typical for DPAS src.
+  bool ValidVector = iSTD::IsPowerOfTwo(VWidth) &&
+                     ((ElSize == 8 && VWidth <= 32) || (ElSize == 16 && VWidth <= 16) || (ElSize == 32 && VWidth <= 8));
+  if (!ValidVector)
+    return;
+
+  // Pattern is matched bottom-up, starting from last IE in chain. Instructions are visited top-down, exit early if this
+  // is not the last IE in chain.
+  if (I.hasOneUse() && isa<InsertElementInst>(I.use_begin()->getUser()))
+    return;
+
+  Instruction *CurrentInst = &I, *NextInst = nullptr;
+  uint64_t Index = 0;
+  APInt VisitedMask(APInt::getZero(VWidth));
+
+  while (true) {
+
+    if (!match(CurrentInst, m_InsertElt(m_Instruction(NextInst), m_Value(), m_ConstantInt(Index))))
+      return;
+
+    VisitedMask.setBit(Index);
+
+    if (NextInst->hasOneUse() && NextInst->getOpcode() == Instruction::InsertElement) {
+      CurrentInst = NextInst;
+    } else {
+      if (VisitedMask.isAllOnesValue()) {
+        // All elements are inserted, so input vector is fully overwritten.
+        CurrentInst->setOperand(0, PoisonValue::get(VType));
+      }
+      return;
+    }
+  }
 }
 
 void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst &I) {
@@ -6206,11 +6338,12 @@ void InsertBranchOpt::ThreeWayLoadSpiltOpt(Function &F) {
 
 void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
   enum Mode {
-    Disable = 0x0,          // Disabled IGC\EnableAtomicBranch = 0x0
-    ZeroAdd = BIT(0),       // Enabled IGC\EnableAtomicBranch = 0x1
-    UMax = BIT(1),          // Enabled IGC\EnableAtomicBranch = 0x2
-    UMin = BIT(2),          // Enabled IGC\EnableAtomicBranch = 0x4
-    UntypedUgmLoad = BIT(3) // Enabled IGC\EnableAtomicBranch = 0x8
+    Disable         = 0x0,    // Disabled IGC\EnableAtomicBranch = 0x0
+    ZeroAdd         = BIT(0), // Enabled IGC\EnableAtomicBranch = 0x1
+    UMax            = BIT(1), // Enabled IGC\EnableAtomicBranch = 0x2
+    UMin            = BIT(2), // Enabled IGC\EnableAtomicBranch = 0x4
+    UntypedUgmLoad  = BIT(3), // Enabled IGC\EnableAtomicBranch = 0x8
+    StatelessAtomic = BIT(4)  // Enabled IGC\EnableAtomicBranch = 0x10
   };
 
   // Allow several modes to be applied
@@ -6218,6 +6351,7 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
   const bool umaxMode = ((mode & UMax) == UMax);
   const bool uminMode = ((mode & UMin) == UMin);
   const bool untypedUgmLoadMode = ((mode & UntypedUgmLoad) == UntypedUgmLoad);
+  const bool statelessMode = ((mode & StatelessAtomic ) == StatelessAtomic);
 
   auto createReadFromAtomic = [=](IRBuilder<> &builder, Instruction *inst, bool isTyped) {
     Constant *zero = ConstantInt::get(inst->getType(), 0);
@@ -6234,7 +6368,15 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
       ld_FunctionArgList[3] = inst->getOperand(3);
       ld_FunctionArgList[4] = zero;
       NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
-    } else {
+    }
+    // Stateless atomic
+    else if ( (cast<GenIntrinsicInst>(inst))->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicrawA64 )
+    {
+      NewInst = builder.CreateLoad( inst->getType(), inst->getOperand( 0 ) );
+      return NewInst;
+    }
+    else
+    {
       std::vector<Type *> types;
       std::vector<Value *> ld_FunctionArgList;
       Function *pLdIntrinsic;
@@ -6306,7 +6448,9 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
         if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomictyped) {
           src = dyn_cast<Instruction>(inst->getOperand(4));
           op = dyn_cast<ConstantInt>(inst->getOperand(5));
-        } else if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicraw) {
+        } else if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicraw ||
+                   (statelessMode && (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicrawA64)
+                                  && (inst->getOperand(0) == inst->getOperand(1)))) {
           src = dyn_cast<Instruction>(inst->getOperand(2));
           op = dyn_cast<ConstantInt>(inst->getOperand(3));
         }
@@ -6333,7 +6477,7 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
     }
 
     IRBuilder<> builder(inst);
-    Instruction *src = dyn_cast<Instruction>(inst->getOperand(srcID));
+    Instruction *src = cast<Instruction>(inst->getOperand(srcID));
     Instruction *readI = nullptr;
     Instruction *ThenTerm = nullptr;
     Instruction *ElseTerm = nullptr;
@@ -6348,7 +6492,7 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
       //    use the original atomic add/sub/umax inst
       // else
       //    use typedread or load
-      Instruction *condInst = dyn_cast<Instruction>(builder.CreateICmp(ICmpInst::ICMP_NE, src, builder.getInt32(0)));
+      Instruction *condInst = cast<Instruction>(builder.CreateICmp(ICmpInst::ICMP_NE, src, builder.getInt32(0)));
       splitBBAndName(condInst, inst, &ThenTerm, &ElseTerm, MergeBlock);
       inst->moveBefore(ThenTerm);
 
@@ -6363,7 +6507,7 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
       //    use the original atomic umax/umin inst src
       readI = createReadFromAtomic(builder, inst, isTyped);
       CmpInst::Predicate predicate = (op == AtomicOp::EATOMIC_UMAX) ? ICmpInst::ICMP_UGT : ICmpInst::ICMP_ULT;
-      Instruction *condInst = dyn_cast<Instruction>(builder.CreateICmp(predicate, src, readI));
+      Instruction *condInst = cast<Instruction>(builder.CreateICmp(predicate, src, readI));
 
       splitBBAndName(condInst, inst, &ThenTerm, nullptr, MergeBlock);
       inst->moveBefore(ThenTerm);
@@ -6726,4 +6870,166 @@ bool InsertBranchOpt::runOnFunction(Function &F) {
   }
 
   return false;
+}
+
+// Canonicalize y*(x+1) => y*x+y. This will emit mad on supported platforms.
+// This pass is dedicated to run after instcombine, which transforms x*y+y => y*(x+1).
+namespace {
+class CanonicalizeMulAdd : public FunctionPass {
+public:
+  static char ID;
+  CanonicalizeMulAdd();
+
+  StringRef getPassName() const override { return "CanonicalizeMulAdd"; }
+
+  bool runOnFunction(Function &F) override;
+
+private:
+  bool visit(BasicBlock &BB);
+  bool visitOneMad(Instruction &I);
+  bool visitTwoMads(Instruction &I);
+  bool visitRotate(Instruction &I);
+};
+} // namespace
+
+IGC_INITIALIZE_PASS_BEGIN(CanonicalizeMulAdd, "igc-canonicalize-mul-add", "Canonicalize MulAdd", false, false)
+IGC_INITIALIZE_PASS_END(CanonicalizeMulAdd, "igc-canonicalize-mul-add", "Canonicalize MulAdd", false, false)
+
+char CanonicalizeMulAdd::ID = 0;
+FunctionPass *IGC::createCanonicalizeMulAddPass() { return new CanonicalizeMulAdd(); }
+
+CanonicalizeMulAdd::CanonicalizeMulAdd() : FunctionPass(ID) {
+  initializeCanonicalizeMulAddPass(*PassRegistry::getPassRegistry());
+}
+
+bool CanonicalizeMulAdd::runOnFunction(Function &F) {
+  bool Changed = false;
+  for (auto &BB : llvm::reverse(F))
+    Changed |= visit(BB);
+  return Changed;
+}
+
+bool CanonicalizeMulAdd::visit(BasicBlock &BB) {
+
+  llvm::SmallVector<Instruction *, 8> Replaced;
+
+  for (auto II = BB.rbegin(), IE = BB.rend(); II != IE; ++II) {
+
+    if (!II->getType()->isIntegerTy() || II->getOpcode() != Instruction::Mul)
+      continue;
+
+    if (visitTwoMads(*II) || visitOneMad(*II) || visitRotate(*II))
+      Replaced.push_back(&*II);
+  }
+
+  for (auto *I : Replaced)
+    RecursivelyDeleteTriviallyDeadInstructions(I);
+
+  return !Replaced.empty();
+}
+
+// x * (y + 1) => x*y + x
+// x * (y - 1) => x*y - x
+bool CanonicalizeMulAdd::visitOneMad(Instruction &I) {
+  using namespace llvm::PatternMatch;
+
+  Value *X = nullptr, *Y = nullptr;
+  ConstantInt *CI = nullptr;
+
+  // sub1, sub2, since order of operands matters for sub
+  bool IsAdd = match(&I, m_c_Mul(m_Value(X), m_c_Add(m_Value(Y), m_ConstantInt(CI))));
+  bool IsSub1 = IsAdd ? false : match(&I, m_c_Mul(m_Value(X), m_Sub(m_Value(Y), m_ConstantInt(CI))));
+  bool IsSub2 = IsAdd || IsSub1 ? false : match(&I, m_c_Mul(m_Value(X), m_Sub(m_One(), m_Value(Y))));
+
+  if (!IsAdd && !IsSub1 && !IsSub2)
+    return false;
+
+  if (!IsSub2 && !CI->isOne() && !CI->isMinusOne())
+    return false;
+
+  auto Opcode = (IsAdd && CI->isMinusOne() || IsSub1 && CI->isOne() || IsSub2) ? Instruction::Sub : Instruction::Add;
+
+  llvm::IRBuilder<> Builder(&I);
+
+  auto *Op1 = Builder.CreateMul(X, Y);
+  auto *Op2 = X;
+
+  if (IsSub2)
+    std::swap(Op1, Op2);
+
+  I.replaceAllUsesWith(Builder.CreateBinOp(Opcode, Op1, Op2));
+  return true;
+}
+
+// Check for pattern of two consecutive mads.
+// Example:
+//   x * ((y + 1) * (z + 1))
+// Output:
+//   mad1 = x*y + x
+//   mad2 = mad1*z + mad1
+// Constant can be either 1 or -1
+bool CanonicalizeMulAdd::visitTwoMads(Instruction &I) {
+  using namespace llvm::PatternMatch;
+
+  Value *Mul = nullptr, *LHS = nullptr, *RHS = nullptr;
+  ConstantInt *LHSConst = nullptr, *RHSConst = nullptr;
+
+  if (!match(&I, m_c_Mul(m_Value(Mul), m_Mul(m_c_Add(m_Value(LHS), m_ConstantInt(LHSConst)),
+                                             m_c_Add(m_Value(RHS), m_ConstantInt(RHSConst))))))
+    return false;
+
+  if (!LHSConst->isOne() && !LHSConst->isMinusOne())
+    return false;
+
+  if (!RHSConst->isOne() && !RHSConst->isMinusOne())
+    return false;
+
+  // For consistency with instcombine, first do side not equal to Mul.
+  if (match(Mul, m_Specific(LHS))) {
+    std::swap(LHS, RHS);
+    std::swap(LHSConst, RHSConst);
+  }
+
+  auto Op1 = LHSConst->isOne() ? Instruction::Add : Instruction::Sub;
+  auto Op2 = RHSConst->isOne() ? Instruction::Add : Instruction::Sub;
+
+  llvm::IRBuilder<> Builder(&I);
+  auto *Mad1 = Builder.CreateBinOp(Op1, Builder.CreateMul(Mul, LHS), Mul);
+  auto *Mad2 = Builder.CreateBinOp(Op2, Builder.CreateMul(Mad1, RHS), Mad1);
+
+  I.replaceAllUsesWith(Mad2);
+  return true;
+}
+
+// Pattern: x * (y + z)
+// If y=x*z, then it is better to rotate instructions to: y*x + y
+// This allows to emit more mads if y=x*z is also optimized later.
+bool CanonicalizeMulAdd::visitRotate(Instruction &I) {
+  using namespace llvm::PatternMatch;
+
+  Value *Mul = nullptr, *LHS = nullptr, *RHS = nullptr;
+
+  bool IsAdd = match(&I, m_c_Mul(m_Value(Mul), m_c_Add(m_Value(LHS), m_Value(RHS))));
+  bool IsSub = IsAdd ? false : match(&I, m_c_Mul(m_Value(Mul), m_Sub(m_Value(LHS), m_Value(RHS))));
+
+  if (!IsAdd && !IsSub)
+    return false;
+
+  bool UseLHS = match(LHS, m_c_Mul(m_Specific(Mul), m_Specific(RHS)));
+  bool UseRHS = UseLHS ? false : match(RHS, m_c_Mul(m_Specific(Mul), m_Specific(LHS)));
+
+  if (!UseLHS && !UseRHS)
+    return false;
+
+  llvm::IRBuilder<> Builder(&I);
+
+  auto *Op1 = Builder.CreateMul(UseLHS ? LHS : RHS, Mul);
+  auto *Op2 = UseLHS ? LHS : RHS;
+
+  // since order of operands matters for sub
+  if (IsSub && UseRHS)
+    std::swap(Op1, Op2);
+
+  I.replaceAllUsesWith(Builder.CreateBinOp(IsAdd ? Instruction::Add : Instruction::Sub, Op1, Op2));
+  return true;
 }

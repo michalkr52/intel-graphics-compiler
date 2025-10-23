@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 #include "GenIntrinsicDefinition.h"
 #include "GenIntrinsicLookup.h"
 #include "Probe/Assertion.h"
+#include "Compiler/CISACodeGen/helper.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Type.h"
 #include "llvmWrapper/IR/Module.h"
@@ -17,6 +18,7 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/CodeGen/ValueTypes.h>
 #include "common/LLVMWarningsPop.hpp"
@@ -42,7 +44,13 @@ std::string getMangledTypeStr(llvm::Type *Ty) {
   std::string Result;
   if (llvm::PointerType *PTyp = llvm::dyn_cast<llvm::PointerType>(Ty)) {
     Result += "p" + llvm::utostr(PTyp->getAddressSpace());
-    if (!IGCLLVM::isOpaquePointerTy(PTyp)) {
+
+    // backward compatibility
+    IGC::RESOURCE_DIMENSION_TYPE resDimTypeId = IGC::DecodeAS4GFXResourceType(PTyp->getAddressSpace());
+    if (resDimTypeId != IGC::RESOURCE_DIMENSION_TYPE::NUM_RESOURCE_DIMENSION_TYPES) {
+      Result += IGC::ResourceDimensionTypeName[resDimTypeId];
+    }
+    else if (!IGCLLVM::isOpaquePointerTy(PTyp)) {
       Result += getMangledTypeStr(IGCLLVM::getNonOpaquePtrEltTy(PTyp)); // Legacy code: getNonOpaquePtrEltTy
     }
   } else if (llvm::ArrayType *ATyp = llvm::dyn_cast<llvm::ArrayType>(Ty)) {
@@ -131,7 +139,14 @@ private:
     // There can never be multiple globals with the same name of different types,
     // because intrinsics must be a specific type.
     IGCLLVM::Module &M = static_cast<IGCLLVM::Module &>(module);
-    llvm::Function *pFunc = llvm::cast<llvm::Function>(M.getOrInsertFunction(funcName, pFuncType, attribs));
+    llvm::Value *func = M.getOrInsertFunction(funcName, pFuncType, attribs);
+    llvm::Function *pFunc = nullptr;
+    if (llvm::isa<llvm::Function>(func))
+        pFunc = llvm::cast<llvm::Function>(func);
+    else if (llvm::isa<llvm::BitCastOperator>(func)) {
+        llvm::BitCastOperator *bco = llvm::cast<llvm::BitCastOperator>(func);
+        pFunc = llvm::cast<llvm::Function>(bco->getOperand(0));
+    }
 
     IGC_ASSERT_MESSAGE(pFunc, "getOrInsertFunction probably returned constant expression!");
     // Since Function::isIntrinsic() will return true due to llvm.* prefix,

@@ -389,7 +389,7 @@ public:
         auto *VectorType = dyn_cast<IGCLLVM::FixedVectorType>(I->getType());
         if (VectorType) {
           if (static_cast<int>(VectorType->getNumElements()) >=
-              C->get(SchedulingConfig::Option::LargeLoadSizeForFragmentationAdjustment)) {
+              adjustElementsFromSIMDSize(C->get(SchedulingConfig::Option::LargeLoadSizeForFragmentationAdjustment))) {
             AdjustmentForFragmentation = C->get(SchedulingConfig::Option::RPMarginIncreaseForFragmentationAdjustment);
           }
         }
@@ -459,7 +459,9 @@ public:
     if (!I)
       return V;
 
-    if (isNoOpInst(I, CTX)) {
+    bool IsAddrSpaceCast = isa<AddrSpaceCastInst>(I);
+
+    if (isNoOpInst(I, CTX) || IsAddrSpaceCast) {
       return getRealOp(I->getOperand(0));
     }
     return V;
@@ -478,6 +480,16 @@ public:
       }
     }
     return HangingInstructions;
+  }
+
+  // Element number heuristics are defined for SIMD16
+  // Adjust the value for SIMD32
+  int adjustElementsFromSIMDSize(int Value) {
+    if (Value == 0)
+      return 0;
+    if (SIMD == 32)
+      return (Value) / 2;
+    return Value;
   }
 
 private:
@@ -568,7 +580,10 @@ private:
   }
 
   int32_t estimateOrUpdateImpl(Instruction *I, bool Update) {
-    if (IGCLLVM::isDebugOrPseudoInst(*I) || I->isLifetimeStartOrEnd() || isNoOpInst(I, CTX)) {
+    auto *Intr = dyn_cast<GenIntrinsicInst>(I);
+    bool IsNoOpIntr = Intr && (Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_ptr_to_pair);
+
+    if (IGCLLVM::isDebugOrPseudoInst(*I) || I->isLifetimeStartOrEnd() || isNoOpInst(I, CTX) || IsNoOpIntr) {
       // NoOp instructions do not change register pressure
       if (Update)
         PrintDumpLevel(VerbosityLevel::High, "NoOp instruction: " << getName(I) << "\n");
@@ -993,8 +1008,20 @@ public:
 
     int32_t MaxOriginalRegpressure = 0;
     bool OriginalScheduleCanHaveSpills = false;
+
+    PrintDump("Original schedule: " << BBName << "\n");
     for (auto &I : *BB) {
-      RPT.update(&I);
+      std::string Info;
+      if (isa<PHINode>(&I)) {
+        // PHIs are already included in the initial regpressure
+        Info = formatDebugInfo(RPT.getCurrentPressure(), 0, "Phi", getVectorShuffleString(&I, VSA, RCA));
+      } else {
+        int32_t Estimate = RPT.update(&I);
+        Info = formatDebugInfo(RPT.getCurrentPressure(), Estimate, "OG", getVectorShuffleString(&I, VSA, RCA));
+      }
+      PrintDump(Info);
+      PrintInstructionDump(&I);
+
       MaxOriginalRegpressure = std::max(MaxOriginalRegpressure, RPT.getCurrentPressure());
       if (RPT.isRegpressureCritical()) {
         OriginalScheduleCanHaveSpills = true;
@@ -1202,6 +1229,45 @@ private:
   SchedulingConfig &C;
   llvm::raw_ostream *LogStream;
 
+  // Helper function to format debug information string
+  static std::string formatDebugInfo(int32_t CurrentPressure, int32_t Estimate, const std::string &Type,
+                                     const std::string &AddString = "") {
+    const int ESTIMATION_NUMBERS_WIDTH = 12;
+    const int INFO_WIDTH = 20;
+    std::string Info = std::to_string(CurrentPressure) + ", " + std::to_string(Estimate);
+    Info.resize(ESTIMATION_NUMBERS_WIDTH, ' ');
+    Info = "(" + Info + ") " + Type + ": ";
+    Info.resize(INFO_WIDTH, ' ');
+
+    if (!AddString.empty()) {
+      Info += AddString;
+    }
+
+    return Info;
+  }
+
+  // Helper function to get vector shuffle string
+  static std::string getVectorShuffleString(Instruction *I, VectorShuffleAnalysis *VSA, RematChainsAnalysis *RCA) {
+    auto *DT = VSA->getDestVector(I);
+    auto *V2SP = VSA->getVectorToScalarsPattern(I);
+    auto *RCP = RCA->getRematChainPattern(I);
+
+    std::string VS_String = "    ";
+    if (RCP) {
+      VS_String = "REM ";
+    } else if (DT && DT->isNoOp()) {
+      VS_String = "NOP ";
+    } else if (DT && DT->isVectorShuffle()) {
+      VS_String = "VS  ";
+    } else if (DT && !DT->isVectorShuffle()) {
+      VS_String = "SCA ";
+    } else if (V2SP) {
+      VS_String = "V2S ";
+    }
+
+    return VS_String;
+  }
+
   class InstructionNode {
   public:
     InstructionNode(Instruction *I, uint32_t N) : I(I), OriginalPosition(N) {
@@ -1222,8 +1288,9 @@ private:
 
     void print(llvm::raw_ostream &LogStream) {
       if (IGC_IS_FLAG_ENABLED(DumpCodeScheduling)) {
-        std::string Info = "Node #" + std::to_string(OriginalPosition) + ", MW: " + std::to_string(MaxWeight) + " ";
-        Info.resize(23, ' ');
+        const int INFO_WIDTH = 16;
+        std::string Info = "#" + std::to_string(OriginalPosition) + ", MW: " + std::to_string(MaxWeight) + " ";
+        Info.resize(INFO_WIDTH, ' ');
         LogStream << Info;
         I->print(LogStream);
         LogStream << "\n";
@@ -1799,6 +1866,9 @@ private:
           if (!UI) {
             continue;
           }
+          if (UI->getParent() != BB) {
+            continue;
+          }
           InstructionNode *UNode = G.InstToNode[UI];
           if (!UNode) {
             continue;
@@ -1962,7 +2032,11 @@ private:
 
         std::function<void(Value *)> collectUses = [&](Value *V) {
           for (auto *U : RT.getRealUses(V)) {
-            auto *RematChainPattern = RCA->getRematChainPattern(U);
+            auto *UI = dyn_cast<Instruction>(U);
+            if (!UI || UI->getParent() != BB) {
+              continue;
+            }
+            auto *RematChainPattern = RCA->getRematChainPattern(UI);
             if (RematChainPattern) {
               // If the use is a remat chain, collect the last instruction in the chain
               Uses.insert(RematChainPattern->getRematTargetInst());
@@ -2005,6 +2079,9 @@ private:
           for (auto *U : getRealUsesThroughVS(Node->I)) {
             auto *I = dyn_cast<Instruction>(U);
             if (!I) {
+              continue;
+            }
+            if (I->getParent() != BB) {
               continue;
             }
 
@@ -2072,7 +2149,8 @@ private:
               Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload) {
             auto VectorType = dyn_cast<IGCLLVM::FixedVectorType>(Intr->getType());
             if (VectorType) {
-              return static_cast<int>(VectorType->getNumElements()) >= static_cast<int>(C[Option::LargeBlockLoadSize]);
+              return static_cast<int>(VectorType->getNumElements()) >=
+                RT.adjustElementsFromSIMDSize(static_cast<int>(C[Option::LargeBlockLoadSize]));
             }
           }
         }
@@ -2089,7 +2167,15 @@ private:
             // if the target instruction is not ready, we need to filter out the first remated instruction
             bool IsReady = true;
             Instruction *TargetInst = RCP->getRematTargetInst();
+            if (TargetInst->getParent() != BB) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
             InstructionNode *TargetNode = G.InstToNode[TargetInst];
+            if (!TargetNode) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
             for (const auto &PN : TargetNode->Preds) {
               IGC_ASSERT(!PN->Deleted);
               if (PN->Src->I == RCP->getLastInst()) {
@@ -2130,8 +2216,16 @@ private:
               NonFilteredNodes.push_back(Node);
               continue;
             }
+            if (SI->getParent() != BB) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
             // If the select instruction is not ready, we need to filter out the icmp instruction
             InstructionNode *SelectNode = G.InstToNode[SI];
+            if (!SelectNode) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
             for (const auto &PN : SelectNode->Preds) {
               if (PN->Src->I == Node->I) {
                 continue;
@@ -2187,11 +2281,20 @@ private:
               }
 
               if (isDPAS(I)) {
-                if (!FirstDPASUser || (G.InstToNode[I]->OriginalPosition < FirstDPASUser->OriginalPosition)) {
-                  FirstDPASUser = G.InstToNode[I];
+                if (I->getParent() != BB) {
+                  continue;
+                }
+
+                auto *DPASNode = G.InstToNode[I];
+                if (!DPASNode) {
+                  continue;
+                }
+
+                if (!FirstDPASUser || (DPASNode->OriginalPosition < FirstDPASUser->OriginalPosition)) {
+                  FirstDPASUser = DPASNode;
 
                   NonFilteredNodes = {Node};
-                } else if (G.InstToNode[I] == FirstDPASUser) {
+                } else if (DPASNode == FirstDPASUser) {
                   NonFilteredNodes.push_back(Node);
                 }
               }
@@ -2335,31 +2438,8 @@ private:
           }
         }
 
-        std::string Info = std::to_string(RT.getCurrentPressure()) + ", " + std::to_string(RT.estimate(Node->I));
-        Info.resize(11, ' ');
-        Info = "(" + Info + ") Im: ";
-        Info.resize(20, ' ');
-
-        auto *V2SP = VSA->getVectorToScalarsPattern(Node->I);
-        auto *RCP = RCA->getRematChainPattern(Node->I);
-
-        if (RCP) {
-          VS_String = "REM";
-        }
-        if (DT && DT->isVectorShuffle()) {
-          VS_String = "VS ";
-        }
-        if (DT && !DT->isVectorShuffle()) {
-          VS_String = "SCA";
-        }
-        if (DT && DT->isNoOp()) {
-          VS_String = "NOP";
-        }
-        if (V2SP) {
-          VS_String = "V2S";
-        }
-
-        Info += VS_String + "   ";
+        std::string Info = formatDebugInfo(
+          RT.getCurrentPressure(), RT.estimate(Node->I), "Im", getVectorShuffleString(Node->I, VSA, RCA));
 
         PrintDump(Info);
         Node->print(*LogStream);
@@ -2446,7 +2526,8 @@ private:
             // Experimental heuristic: prioritize loads that unlock
             // DPASes
             FilteredReadyList = getLoadsThatUnlockDPASes(FilteredReadyList,
-                                                         C[Option::PrioritizeLoadsThatUnlockDPASesHighRP_MaxLoadSize]);
+                                                         RT.adjustElementsFromSIMDSize(
+                                                          C[Option::PrioritizeLoadsThatUnlockDPASesHighRP_MaxLoadSize]));
           }
           if (C[Option::PrioritizePopulatingOneVectorHighRP]) {
             FilteredReadyList = filterOutNotUnblockingExistingVectorInst(FilteredReadyList);
@@ -2476,27 +2557,11 @@ private:
           AllInstructionsScheduledByRP = false;
         }
 
-        // Dump the info
-        std::string Info = std::to_string(RT.getCurrentPressure()) + ", " + std::to_string(RT.estimate(Node->I));
-        Info.resize(11, ' ');
-        Info = "(" + Info + ") " + (ChooseByRP ? "RP" : "MW") + ": ";
-        Info.resize(20, ' ');
-
-        auto *DT = VSA->getDestVector(Node->I);
-
-        std::string VS_String = "   ";
-        if (DT && DT->isVectorShuffle()) {
-          VS_String = "VS ";
-        }
-        if (DT && !DT->isVectorShuffle()) {
-          VS_String = "SCA";
-        }
-        if (DT && DT->isNoOp()) {
-          VS_String = "NOP";
-        }
-
-        Info += VS_String + (CanClone ? " * " : "   ");
-
+        std::string ChoosingMode = ChooseByRP ? "RP" : "MW";
+        ChoosingMode += CanClone ? "*" : "";
+        std::string Info = formatDebugInfo(RT.getCurrentPressure(), RT.estimate(Node->I),
+                           ChoosingMode,
+                           getVectorShuffleString(Node->I, VSA, RCA));
         PrintDump(Info);
         Node->print(*LogStream);
 

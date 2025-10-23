@@ -757,6 +757,10 @@ bool hasWriteCombine() const {
   return getPlatform() >= Xe2;
 }
 
+bool needWriteCombineWA() const {
+  return hasWriteCombine() && getPlatform() <= Xe3;
+}
+
 bool hasA0WARHWissue() {
   return getPlatform() >= Xe_XeHPSDV && getPlatform() < Xe2;
 }
@@ -777,6 +781,10 @@ bool enableSendIndirect() const {
 }
 
 unsigned int getMaxPTSS() const {
+  if (getuint32Option(vISA_maxPTSSOverride)) {
+    return getuint32Option(vISA_maxPTSSOverride);
+  }
+
   if (hasScratchSurface()) {
     // Max PTSS supported is 256kb
     return 256 * 1024;
@@ -955,4 +963,5 @@ bool src1Src2SwapForCompaction()
 bool reserver510() {
   return false;
 }
+
 // end HW capabilities

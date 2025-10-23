@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/IGCPassSupport.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "common/igc_resourceDimTypes.h"
+#include "Compiler/CISACodeGen/helper.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -89,12 +90,9 @@ bool SamplerPerfOptPass::isSampleWithHalfType(SampleIntrinsic *sampleInst) {
 
 template <typename SampleOrGather4Intrinsic>
 bool SamplerPerfOptPass::isSamplingFromCubeSurface(SampleOrGather4Intrinsic *inst) {
-  llvm::Value *textureOp = inst->getTextureValue();
-  if (textureOp && (textureOp->getType()->getNumContainedTypes() != 0) &&
-      ((textureOp->getType()->getContainedType(0) ==
-        IGC::GetResourceDimensionType(*inst->getModule(), IGC::DIM_CUBE_ARRAY_TYPE)) ||
-       (textureOp->getType()->getContainedType(0) ==
-        IGC::GetResourceDimensionType(*inst->getModule(), IGC::DIM_CUBE_TYPE)))) {
+  RESOURCE_DIMENSION_TYPE textureType = inst->getTextureDimType();
+  if ((textureType == RESOURCE_DIMENSION_TYPE::DIM_CUBE_ARRAY_TYPE) ||
+      (textureType == RESOURCE_DIMENSION_TYPE::DIM_CUBE_TYPE)) {
     return true;
   }
   return false;
@@ -326,11 +324,14 @@ bool SamplerPerfOptPass::runOnFunction(Function &F) {
           }
         }
         if (SamplerLoadIntrinsic *loadInst = dyn_cast<SamplerLoadIntrinsic>(II)) {
-       // EnableLscSamplerRouting key is true (default)
-       // DisableLscSamplerRouting is from UMD AIL to turn off per shader
-          if (ctx->platform.hasLSCSamplerRouting() && IGC_IS_FLAG_ENABLED(EnableLscSamplerRouting) &&
+          // LscSamplerRouting is from UMD AIL to control per shader
+          const unsigned int umdLscSamplerRouting = ctx->getModuleMetaData()->compOpt.LscSamplerRouting;
+          const IGC::TriboolFlag regKeyValue = static_cast<IGC::TriboolFlag>(IGC_GET_FLAG_VALUE(EnableLscSamplerRouting));
+          const bool defaultValue = (umdLscSamplerRouting == LOADS_VIA_LSC_DEFAULT) ? ctx->platform.enableLscSamplerRouting() : (umdLscSamplerRouting == LOADS_VIA_LSC_ENABLE);
+          const bool enableLscSamplerRouting = (regKeyValue == IGC::TriboolFlag::Default) ? defaultValue : (regKeyValue == IGC::TriboolFlag::Enabled);
+
+          if (ctx->platform.hasLSCSamplerRouting() && !enableLscSamplerRouting &&
               ctx->m_DriverInfo.supportLscSamplerRouting() &&
-              !ctx->getModuleMetaData()->compOpt.DisableLscSamplerRouting &&
               loadInst->getIntrinsicID() == GenISAIntrinsic::GenISA_ldptr) {
             changed = ConvertLdToLdl(loadInst);
           }

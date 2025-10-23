@@ -84,6 +84,8 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/BIFTransforms/BIFTransforms.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/BreakdownIntrinsic/BreakdownIntrinsic.h"
 #include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass/TransformUnmaskedFunctionsPass.h"
+#include "Compiler/Optimizer/OpenCLPasses/DisableInlining/DisableInlining.h"
+#include "Compiler/Optimizer/OpenCLPasses/DropTargetFunctions/DropTargetFunctions.h"
 #include "Compiler/Optimizer/OpenCLPasses/KernelFunctionCloning/KernelFunctionCloning.h"
 #include "Compiler/Optimizer/OpenCLPasses/NontemporalLoadsAndStoresInAssert/NontemporalLoadsAndStoresInAssert.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/HandleDevicelibAssert/HandleDevicelibAssert.hpp"
@@ -136,8 +138,6 @@ SPDX-License-Identifier: MIT
 
 #include <string>
 
-#include <Metrics/IGCMetric.h>
-
 using namespace llvm;
 using namespace IGC::IGCMD;
 using namespace IGC::Debug;
@@ -184,9 +184,6 @@ static void CommonOCLBasedPasses(OpenCLProgramContext *pContext) {
   COMPILER_TIME_START(pContext, TIME_UnificationPasses);
 
   setupTriple(*pContext);
-
-  pContext->metrics.Init(&pContext->hash, pContext->getModule()->getNamedMetadata("llvm.dbg.cu") != nullptr);
-  pContext->metrics.CollectFunctions(pContext->getModule());
 
   unify_opt_PreProcess(pContext);
   pContext->m_checkFastFlagPerInstructionInCustomUnsafeOptPass = true;
@@ -301,6 +298,14 @@ static void CommonOCLBasedPasses(OpenCLProgramContext *pContext) {
 
   mpm.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
   mpm.add(new CodeGenContextWrapper(pContext));
+
+  if (IGC_IS_FLAG_ENABLED(EnableDropTargetFunctions)) {
+    mpm.add(new DropTargetFunctions());
+  }
+
+  if (IGC_IS_FLAG_ENABLED(DisableInlining)) {
+    mpm.add(new DisableInlining());
+  }
 
   if (IGC_IS_FLAG_ENABLED(EnableUnmaskedFunctions)) {
     mpm.add(new TransformUnmaskedFunctionsPass());

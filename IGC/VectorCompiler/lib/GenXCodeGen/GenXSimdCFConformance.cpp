@@ -2088,8 +2088,8 @@ void GenXSimdCFConformance::lowerUnsuitableGetEMs() {
     }
 
     // Constants and non-EM values should be used directly
-    if (dyn_cast<Constant>(GetEMPred) ||
-        !getEMProducer(dyn_cast<Instruction>(GetEMPred), Visited)) {
+    if (auto *Inst = dyn_cast<Instruction>(GetEMPred);
+        isa<Constant>(GetEMPred) || Inst && !getEMProducer(Inst, Visited)) {
       GetEM->replaceAllUsesWith(GetEM->getOperand(0));
       ToDelete.push_back(GetEM);
     }
@@ -3044,7 +3044,7 @@ bool GenXSimdCFConformance::getConnectedVals(
   if (LowerBadUsers) {
     SetVector<Value *> ToRemove;
     for (auto &BadUser : UsersToLower) {
-      replaceUseWithLoweredEM(dyn_cast<Instruction>(BadUser.getValue()),
+      replaceUseWithLoweredEM(cast<Instruction>(BadUser.getValue()),
                               BadUser.getIndex(), ToRemove);
     }
     for (auto Inst : ToRemove) {
@@ -3233,7 +3233,7 @@ void GenXSimdCFConformance::resolveBitCastChains() {
       continue;
 
     std::set<Value *> Visited;
-    Instruction *I = dyn_cast<Instruction>(Val.getValue());
+    Instruction *I = cast<Instruction>(Val.getValue());
     Value *EMProd = getEMProducer(I, Visited, true);
 
     if (!EMProd) {

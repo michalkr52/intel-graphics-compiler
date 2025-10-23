@@ -1888,16 +1888,14 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(std::ostream &os,
   // there's an empty BB contains only labels. The BB and the following BB will
   // both print those labels. The pair is the pc to label name pair.
   std::set<std::pair<int32_t, std::string>> printedLabels;
-  // tryPrintLable - check if the given label is already printed with the given
+  // tryPrintLabel - check if the given label is already printed with the given
   // pc. Print it if not, and skip it if yes.
   auto tryPrintLabel = [&os, &printedLabels](int32_t label_pc,
                                              const std::string &label_name) {
-    auto label_pair = std::make_pair(label_pc, label_name);
-    // skip if the same label in the set
-    if (printedLabels.find(label_pair) != printedLabels.end())
-      return;
-    os << label_name << ":\n";
-    printedLabels.insert(label_pair);
+    auto [iter, inserted] = printedLabels.emplace(label_pc, label_name);
+    // print if the label is new in the set.
+    if (inserted)
+      os << label_name << ":\n";
   };
 
   for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB) {
@@ -2251,16 +2249,28 @@ bool GRFMode::hasSmallerGRFSameThreads() const {
 
 // Get spill threshold for current GRF mode
 unsigned GRFMode::getSpillThreshold() const {
+  const auto &config = configs[currentMode];
+  uint32_t numGRF = config.numGRF;
+
+  // Platforms pre Xe3 do not support spill threshold
   if (platform < Xe3)
     return 0;
-  // FIXME: currently spill thresholds for <96GRF are
-  // causing some performance regressions. We need more
-  // study to define proper thresholds for this range.
-  if (configs[currentMode].numGRF < 96)
-    return 0;
-  if (configs[currentMode].numGRF == 256 &&
-      options->getuInt32Option(vISA_SpillAllowed256GRF) > 0)
-    return options->getuInt32Option(vISA_SpillAllowed256GRF);
 
+  // Xe3 supports spill threshold only if GRF >= 128
+  if (platform == Xe3 && numGRF < 128)
+    return 0;
+
+  // Platforms after Xe3 support spilling only if GRF >= 96
+  if (platform > Xe3 && numGRF < 96)
+    return 0;
+
+  // Special case: 256 GRF with specific spill option
+  if (numGRF == 256) {
+    uint32_t spill256Option = options->getuInt32Option(vISA_SpillAllowed256GRF);
+    if (spill256Option > 0)
+      return spill256Option;
+  }
+
+  // Default spill threshold
   return options->getuInt32Option(vISA_SpillAllowed);
 }

@@ -226,7 +226,7 @@ public:
   virtual bool NeedWAToTransformA32MessagesToA64() const { return false; }
 
   /// disable mad in Vertex shader to avoid ZFigthing issues
-  virtual bool DisabeMatchMad() const { return false; }
+  virtual bool DisableMatchMad() const { return false; }
 
   /// Some FE sends SLM pointers in DWORD units
   virtual bool WASLMPointersDwordUnit() const { return false; }
@@ -390,7 +390,7 @@ public:
   virtual bool supportsVRT() const { return true; }
 
   virtual bool supportsUniformPrivateMemorySpace() const { return false; }
-  virtual uint32_t maxNumCoherenceHintBitsForReorderThread() const { return 0; }
+
 
   virtual bool UseNewTraceRayInlineLoweringInRaytracingShaders() const {
     return (IGC_GET_FLAG_VALUE(UseNewInlineRaytracing) & static_cast<uint32_t>(NewInlineRaytracingMask::RTShaders)) !=
@@ -400,6 +400,7 @@ public:
     return (IGC_GET_FLAG_VALUE(UseNewInlineRaytracing) &
             static_cast<uint32_t>(NewInlineRaytracingMask::NonRTShaders)) != 0;
   }
+  virtual bool supportsAtomicIaddToIncDec() const { return true; }
 
 protected:
   bool autoGRFSelection = false;

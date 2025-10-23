@@ -736,6 +736,12 @@ bool EmitPass::runOnFunction(llvm::Function &F) {
            m_pCtx->platform.getPlatformInfo().eProductFamily == IGFX_ARROWLAKE)) {
         m_encoder->SetIsCodePatchCandidate(false);
       }
+
+      if (m_pCtx->platform.supportDualSimd8PS() &&
+          m_pCtx->platform.isCoreChildOf(IGFX_XE2_HPG_CORE) &&
+          m_currShader->GetShaderType() == ShaderType::PIXEL_SHADER ) {
+        m_encoder->SetIsCodePatchCandidate(false);
+      }
     } else {
       m_encoder->SetIsCodePatchCandidate(false);
     }
@@ -2426,6 +2432,7 @@ void EmitPass::EmitPack4i8(const std::array<EOPCODE, 4> &opcodes, const std::arr
     CVariable *src0 = GetSrcVariable(sources0[i]);
     switch (opcodes[i]) {
     case llvm_bitcast:
+    case llvm_fptosi:
       m_encoder->Cast(dst, src0);
       break;
     case llvm_min:
@@ -4019,12 +4026,11 @@ void EmitPass::BinaryUnary(llvm::Instruction *inst, const SSource source[2], con
     Xor(source, modifier);
     break;
   case Instruction::Mul:
-    Mul(source, modifier);
-    break;
   case Instruction::FMul:
     Mul(source, modifier);
     break;
   case Instruction::FAdd:
+  case Instruction::Add:
     Add(source, modifier);
     break;
   case Instruction::Call:
@@ -9133,7 +9139,7 @@ void EmitPass::EmitInlineAsm(llvm::CallInst *inst) {
     return;
 
   if (!validateInlineAsmConstraints(inst, constraints)) {
-    IGC_ASSERT_MESSAGE(0, "Constraints for inline assembly cannot be validated");
+    m_pCtx->EmitError("Constraints for inline assembly cannot be validated", inst);
     return;
   }
 

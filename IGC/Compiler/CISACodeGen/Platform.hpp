@@ -352,6 +352,10 @@ public:
            IGC_IS_FLAG_ENABLED(EnableIntegerMad);
   }
 
+  bool supportsSourceModifierForMixedIntMad() const {
+    return false;
+  }
+
   bool isDG1() const { return m_platformInfo.eProductFamily == IGFX_DG1; }
 
   bool simplePushIsFasterThanGather() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN12_CORE; }
@@ -831,8 +835,7 @@ public:
   }
 
   bool supportDualSimd8PS() const {
-    return IGC_IS_FLAG_ENABLED(EnableDualSIMD8) && (m_platformInfo.eRenderCoreFamily >= IGFX_GEN12_CORE) &&
-           !isCoreChildOf(IGFX_XE2_HPG_CORE);
+    return IGC_IS_FLAG_ENABLED(EnableDualSIMD8) && (m_platformInfo.eRenderCoreFamily >= IGFX_GEN12_CORE);
   }
 
   bool hasDualSimd8Payload() const {
@@ -918,6 +921,9 @@ public:
   //   TGLLP and below are for each FFTID: 2M.
   uint32_t maxPerThreadScratchSpace(
   ) const {
+    if(IGC_IS_FLAG_ENABLED(MaxPerThreadScratchSpaceOverride)){
+      return IGC_GET_FLAG_VALUE(MaxPerThreadScratchSpaceOverride);
+    }
 
     return hasScratchSurface() ? 0x40000 : 0x200000;
   }
@@ -1333,6 +1339,7 @@ public:
   }
 
   bool preferLSCCache() const { return isCoreChildOf(IGFX_XE2_HPG_CORE); }
+  bool canCachePartialWrites() const { return isCoreChildOf(IGFX_XE2_HPG_CORE); }
 
   bool usesDynamicPolyPackingPolicies() const {
     return isCoreChildOf(IGFX_XE3_CORE) && IGC_IS_FLAG_DISABLED(DisableDynamicPolyPackingPolicies);
@@ -1345,5 +1352,9 @@ public:
   }
 
   bool allowsMoviForType(VISA_Type type) const { return (type == ISA_TYPE_UD || type == ISA_TYPE_D); }
+
+  bool enableLscSamplerRouting() const {
+      return isCoreChildOf(IGFX_XE3_CORE);
+  }
 };
 } // namespace IGC

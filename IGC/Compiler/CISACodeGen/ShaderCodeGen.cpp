@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "AdaptorOCL/MergeAllocasOCL.h"
 #include "Compiler/Legalizer/PeepholeTypeLegalizer.hpp"
+#include "Compiler/CISACodeGen/DropTargetBBs.hpp"
 #include "Compiler/CISACodeGen/layout.hpp"
 #include "Compiler/CISACodeGen/DeSSA.hpp"
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
@@ -366,6 +367,9 @@ void AddAnalysisPasses(CodeGenContext &ctx, IGCPassManager &mpm) {
     mpm.add(new IGCRegisterPressurePrinter("final"));
   // Let Layout be the last pass before Emit Pass
   mpm.add(new Layout());
+  if (IGC_IS_FLAG_ENABLED(EnableDropTargetBBs)) {
+    mpm.add(new DropTargetBBs());
+  }
 
 
   mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Analysis, STATS_COUNTER_END));
@@ -563,6 +567,10 @@ void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager &mpm, PSSignature
     // Promotes indirect resource access to direct
     mpm.add(new BreakConstantExpr());
     mpm.add(new PromoteResourceToDirectAS());
+  }
+
+  if (!isOptDisabled) {
+    mpm.add(createPruneUnusedArgumentsPass());
   }
 
   if (ctx.m_instrTypes.hasReadOnlyArray) {
@@ -773,6 +781,9 @@ void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager &mpm, PSSignature
     // Last instruction combining pass needs to be before Legalization pass, as it can produce illegal instructions.
     mpm.add(new RemoveCodeAssumptions());
     mpm.add(createIGCInstructionCombiningPass());
+    if (ctx.platform.doIntegerMad() && ctx.m_DriverInfo.EnableIntegerMad()) {
+      mpm.add(createCanonicalizeMulAddPass());
+    }
     mpm.add(new GenSpecificPattern());
     // Cases with DPDivSqrtEmu grow significantly.
     // We can disable EarlyCSE when m_hasDPDivSqrtEmu is true,
@@ -852,6 +863,34 @@ void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager &mpm, PSSignature
     }
 
     mpm.add(createCloneAddressArithmeticPass());
+    // cloneAddressArithmetic leaves old instructions unnecessary
+    // dce pass helps to clean that up
+    mpm.add(createDeadCodeEliminationPass());
+    if (IGC_IS_FLAG_SET(DumpRegPressureEstimate))
+      mpm.add(new IGCRegisterPressurePrinter("after_remat"));
+  } else if (ctx.m_retryManager.AllowCloneAddressArithmetic() && IGC_GET_FLAG_VALUE(RematOptionsForRetry) ||
+             ctx.platform.supportsVRT() && IGC_GET_FLAG_VALUE(RematOptionsForVRT)) {
+
+    if (IGC_GET_FLAG_VALUE(RematInstCombineBefore))
+      mpm.add(createIGCInstructionCombiningPass());
+
+    // see comment above
+    if (IGC_GET_FLAG_VALUE(RematReassocBefore)) {
+      mpm.add(llvm::createReassociatePass());
+      mpm.add(llvm::createEarlyCSEPass());
+      mpm.add(llvm::createReassociatePass());
+      mpm.add(llvm::createEarlyCSEPass());
+      mpm.add(llvm::createReassociatePass());
+      mpm.add(llvm::createEarlyCSEPass());
+    }
+
+    // if both retry and VRT checks go through, retry is more important
+    auto rematOptions = ctx.m_retryManager.AllowCloneAddressArithmetic() && IGC_GET_FLAG_VALUE(RematOptionsForRetry)
+                            ? static_cast<IGC::REMAT_OPTIONS>(IGC_GET_FLAG_VALUE(RematOptionsForRetry))
+                            : static_cast<IGC::REMAT_OPTIONS>(IGC_GET_FLAG_VALUE(RematOptionsForVRT));
+
+    mpm.add(createCloneAddressArithmeticPassWithFlags(rematOptions));
+
     // cloneAddressArithmetic leaves old instructions unnecessary
     // dce pass helps to clean that up
     mpm.add(createDeadCodeEliminationPass());

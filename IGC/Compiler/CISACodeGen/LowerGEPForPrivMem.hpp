@@ -73,7 +73,8 @@ public:
   SOALayoutChecker(llvm::AllocaInst &allocaToCheck, bool isOCL);
   SOALayoutChecker() = delete;
   ~SOALayoutChecker() = default;
-  SOALayoutChecker(SOALayoutChecker &) = delete;
+  SOALayoutChecker(const SOALayoutChecker &) = delete;
+  SOALayoutChecker operator=(const SOALayoutChecker &) = delete;
 
   SOALayoutInfo getOrGatherInfo();
 
@@ -136,7 +137,8 @@ private:
 
 class TransposeHelper {
 public:
-  TransposeHelper(const llvm::DataLayout &DL, bool vectorIndex) : m_vectorIndex(vectorIndex), m_DL(DL) {}
+  TransposeHelper(const llvm::DataLayout &DL, bool vectorIndex)
+      : m_vectorIndex(vectorIndex), m_DL(DL), m_promotedLaneBytes(0) {}
   void HandleAllocaSources(llvm::Instruction *v, llvm::Value *idx);
   void handleGEPInst(llvm::GetElementPtrInst *pGEP, llvm::Value *idx);
   // Temporary, this is to replace HandleGEPInst
@@ -151,6 +153,10 @@ public:
 protected:
   const llvm::DataLayout &m_DL;
   std::vector<llvm::Instruction *> m_toBeRemovedGEP;
+  // Size in bytes of one promoted lane element (base scalar chosen for the promoted alloca).
+  // Used to correctly scale indices when a use reinterprets memory as a vector
+  // of smaller element size (e.g. <8 x i32> over double lanes).
+  uint32_t m_promotedLaneBytes;
 
 private:
   bool m_vectorIndex;

@@ -191,7 +191,8 @@ void DebugEmitter::processCurrentFunction(bool finalize, const IGC::VISAObjectDe
 
     const auto *scope = loc->getScope();
     auto src = m_pDwarfDebug->getOrCreateSourceID(scope->getFilename(), scope->getDirectory(),
-                                                  m_pStreamEmitter->GetDwarfCompileUnitID());
+                                                  m_pDwarfDebug->getMD5AsBytes(scope->getFile()), scope->getSource(),
+                                                  m_pStreamEmitter->GetDwarfCompileUnitID(), false);
 
     unsigned int Flags = 0;
     // Add is_stmt flag if (line, inlinedAt) pair is seen for the first time.
@@ -442,7 +443,9 @@ void DebugEmitter::prepareElfForZeBinary(bool is64Bit, char *pElfBuffer, size_t 
       }
     }
   } else {
-    IGC_ASSERT_MESSAGE(is64Bit, "64-bit ELF file only supported");
+    auto ST = m_pVISAModule->getShaderType();
+    if (ST && (ST == ShaderType::COMPUTE_SHADER || ST == ShaderType::OPENCL_SHADER))
+      IGC_ASSERT_MESSAGE(is64Bit, "64-bit ELF file only supported");
   }
 }
 

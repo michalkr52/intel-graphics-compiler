@@ -32,12 +32,9 @@ struct regMap {
   unsigned short dstReg;
   unsigned short srcReg;
 
-  regMap() : localID(-1), dstReg(-1), srcReg(-1) { ; }
+  regMap() : localID(-1), dstReg(-1), srcReg(-1) {}
   regMap(unsigned int id, unsigned short dst, unsigned src)
-      : localID(id), dstReg(dst), srcReg(src) {
-    ;
-  }
-  ~regMap() {}
+      : localID(id), dstReg(dst), srcReg(src) {}
 };
 
 struct regMapBRA {
@@ -46,14 +43,9 @@ struct regMapBRA {
   unsigned int offset = 0;
   G4_Operand *opnd = nullptr;
 
-  regMapBRA() {}
-
   regMapBRA(G4_INST *i, Gen4_Operand_Number n, unsigned int off,
             G4_Operand *src)
-      : inst(i), opndNum(n), offset(off), opnd(src) {
-    ;
-  }
-  ~regMapBRA() {}
+      : inst(i), opndNum(n), offset(off), opnd(src) {}
 };
 
 struct regCandidates {
@@ -70,12 +62,30 @@ struct regCandidatesBRA {
   regCandidatesBRA() : firstDefID(-1), isLargeGRF(false) { dstSrcMap.clear(); }
 };
 
+class SRSubPass {
+  IR_Builder &builder;
+  G4_Kernel &kernel;
+
+public:
+  SRSubPass(IR_Builder &B, G4_Kernel &K) : builder(B), kernel(K) {}
+  SRSubPass(const SRSubPass &) = delete;
+  SRSubPass& operator=(const SRSubPass&) = delete;
+  virtual ~SRSubPass() = default;
+
+  void run() {
+    for (auto bb : kernel.fg) {
+      SRSub(bb);
+    }
+  }
+  bool isSRCandidate(G4_INST *inst, regCandidates &dstSrcRegs);
+  bool replaceWithSendi(G4_BB *bb, INST_LIST_ITER instIter,
+                        std::vector<regMap> &dstSrcRegs, bool src0Mov);
+  void SRSub(G4_BB *bb);
+};
+
 class SRSubPassAfterRA {
   IR_Builder &builder;
   G4_Kernel &kernel;
-  BitSet UsedS0SubReg;
-  unsigned short S0SubRegNum = 0;
-  unsigned short S0Index = 0;
   unsigned candidateID = 0;
 
 public:
@@ -83,23 +93,13 @@ public:
   }
   SRSubPassAfterRA(const SRSubPassAfterRA &) = delete;
   SRSubPassAfterRA& operator=(const SRSubPassAfterRA&) = delete;
-  ~SRSubPassAfterRA() {
-  };
 
   void run() {
     for (auto bb : kernel.fg) {
       SRSubAfterRA(bb);
     }
   }
-  bool isRemoveAble(G4_INST *inst);
-  G4_INST *getRemoveableImm(G4_INST *inst, std::vector<G4_INST *> &immMovs);
-  bool isDefinedMultipleTimes(
-      G4_INST *defInst, Gen4_Operand_Number opndNum,
-      regCandidatesBRA &dstSrcRegs, std::vector<G4_INST *> &immMovs,
-      std::vector<std::pair<Gen4_Operand_Number, unsigned>> &notRemoveableMap,
-      BitSet &definedGRF);
   bool isSRCandidateAfterRA(G4_INST *inst, regCandidatesBRA &dstSrcRegs);
-  unsigned short allocateS0(unsigned short UQNum);
   bool replaceWithSendiAfterRA(G4_BB *bb, INST_LIST_ITER instIter,
                                regCandidatesBRA &dstSrcRegs);
   void SRSubAfterRA(G4_BB *bb);

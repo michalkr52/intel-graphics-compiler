@@ -58,6 +58,7 @@ public:
   void visitMulH(llvm::CallInst *inst, bool isSigned);
   void visitFPToUIInst(llvm::FPToUIInst &FPUII);
   void visitFPTruncInst(llvm::FPTruncInst &I);
+  void visitInsertElementInst(llvm::InsertElementInst &I);
   void visitExtractElementInst(llvm::ExtractElementInst &I);
   void visitLdptr(llvm::SamplerLoadIntrinsic *inst);
   void visitLdRawVec(llvm::CallInst *inst);
@@ -71,6 +72,7 @@ public:
   void visitSelectInst(llvm::SelectInst &S);
   void mergeDotAddToDp4a(llvm::CallInst *I);
   void visitTruncInst(llvm::TruncInst &I);
+  void visitIntAtomicIAddToIncOrDec(llvm::CallInst *I);
 
   //
   // IEEE Floating point arithmetic is not associative.  Any pattern
@@ -218,4 +220,5 @@ llvm::FunctionPass *createCleanPHINodePass();
 llvm::FunctionPass *createMergeMemFromBranchOptPass();
 llvm::FunctionPass *createSinkLoadOptPass();
 llvm::FunctionPass *createInsertBranchOptPass();
+llvm::FunctionPass *createCanonicalizeMulAddPass();
 } // namespace IGC

@@ -44,8 +44,7 @@ private:
   bool LowerAllocations(llvm::Function &F);
   LivenessDataMap AnalyzeLiveness(llvm::Function &F, llvm::DominatorTree &DT, llvm::LoopInfo &LI);
   void AssignSlots(llvm::Function &F, const LivenessDataMap &livenessDataMap);
-  void HandleOptimizationsAndSpills(llvm::Function &F, LivenessDataMap &livenessDataMap, llvm::DominatorTree &DT,
-                                    llvm::LoopInfo &LI);
+  void HandleOptimizationsAndSpills(llvm::Function &F, LivenessDataMap &livenessDataMap);
   void LowerSlotAssignments(llvm::Function &F);
   void LowerStackPtrs(llvm::Function &F);
 
@@ -143,11 +142,15 @@ private:
     IRB.CreateStore(packedData, getAtIndexFromRayQueryObject(IRB, rqObject, 1));
   }
 
+  bool allowCrossBlockLoadVectorization() {
+
+    return IGC_IS_FLAG_ENABLED(UseCrossBlockLoadVectorizationForInlineRaytracing) && m_pCGCtx->m_retryManager.IsFirstTry();
+  }
+
   llvm::RTBuilder::SyncStackPointerVal *getStackPtr(llvm::RTBuilder &IRB, llvm::Value *rqObject,
                                                     bool allowXBlockVectorize = false) {
 
-    bool doXBlockVectorize =
-        allowXBlockVectorize && IGC_IS_FLAG_ENABLED(UseCrossBlockLoadVectorizationForInlineRaytracing);
+    bool doXBlockVectorize = allowCrossBlockLoadVectorization() && allowXBlockVectorize;
 
     // scan the basic block for continuation intrinsics. we don't want to contribute to raytracing swstack
     if (doXBlockVectorize) {
@@ -160,13 +163,15 @@ private:
       auto key = std::make_pair(IRB.GetInsertBlock(), rqObject);
       if (m_CrossBlockVectorizationStacks.find(key) == m_CrossBlockVectorizationStacks.end()) {
 
+        auto &DL = m_pCGCtx->getModule()->getDataLayout();
         llvm::RTBuilder::InsertPointGuard g(IRB);
+
         IRB.SetInsertPoint(key.first->getParent()->getEntryBlock().getFirstNonPHI());
         auto *SMStack =
             IRB.CreateAlloca(IRB.getRTStack2Ty(), nullptr,
                              VALUE_NAME("CrossBlockLoadSMStackForBlock"));
         IRB.SetInsertPoint(key.first->getFirstNonPHI());
-        IRB.CreateMemCpy(SMStack, getStackPtr(IRB, rqObject), IRB.getSyncRTStackSize(),
+        IRB.CreateMemCpy(SMStack, getStackPtr(IRB, rqObject), IRB.getInt64(DL.getTypeAllocSize(IRB.getRTStack2Ty())),
                          RayDispatchGlobalData::StackChunkSize);
         m_CrossBlockVectorizationStacks[key] = SMStack;
       }

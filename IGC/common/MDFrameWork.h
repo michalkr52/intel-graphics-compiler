@@ -36,14 +36,14 @@ namespace llvm
     class Type;
     }
 
-const unsigned int INPUT_RESOURCE_SLOT_COUNT = 128;
-const unsigned int NUM_SHADER_RESOURCE_VIEW_SIZE = (INPUT_RESOURCE_SLOT_COUNT + 1) / 64;
-
 const unsigned int g_c_maxNumberOfBufferPushed = 4;
 static const int MAX_VECTOR_SIZE_TO_PRINT_IN_SHADER_DUMPS = 1000;
 
 namespace IGC
 {
+    const unsigned int INPUT_RESOURCE_SLOT_COUNT = 128;
+    const unsigned int NUM_SHADER_RESOURCE_VIEW_SIZE = (INPUT_RESOURCE_SLOT_COUNT + 1) / 64;
+
     const unsigned int INVALID_CONSTANT_BUFFER_INVALID_ADDR = 0xFFFFFFFF;
 
     enum FunctionTypeMD
@@ -324,6 +324,10 @@ enum class ShaderTypeMD
 
         // for continuations used in ReorderThread, this field indicates the maximum value of the coherence hint
         uint32_t NumCoherenceHintBits = 0;
+
+        // if the function was created by cloning another function
+        // this will contain the name of the original shader
+        std::string OriginatingShaderName;
     };
 
     struct ConstantAddress
@@ -498,7 +502,7 @@ enum class ShaderTypeMD
         unsigned FastestS1Options                       = 0;  // FCEXP_NO_EXPRIMENT. Can't access the enum here for some reason.
         bool DisableFastestForWaveIntrinsicsCS          = false;
         bool ForceLinearWalkOnLinearUAV                 = false;
-        bool DisableLscSamplerRouting                   = false;
+        unsigned LscSamplerRouting                      = 0;
         bool UseBarrierControlFlowOptimization          = false;
         bool EnableDynamicRQManagement                  = false;
         bool WaDisablePayloadCoalescing                 = false;
@@ -509,6 +513,7 @@ enum class ShaderTypeMD
         bool UseInstructionHoistingOptimization         = false;
         bool DisableResourceLoopDestLifeTimeStart       = false;
         bool UseLinearScanRA                            = false;
+        bool DisableConvertingAtomicIAddToIncDec        = false;
     };
 
     enum class ThreadIDLayout

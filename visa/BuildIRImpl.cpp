@@ -174,6 +174,8 @@ bool IR_Builder::isGRFDstAligned(G4_Operand* opnd, int alignByte) const
 
   dcl = opnd->getBase()->asRegVar()->getDeclare();
   while (dcl && dcl->getAliasDeclare()) {
+    // If the variable has sub register alignment requirement.
+    // The sub alignment is in the word unit.
     if (dcl->getSubRegAlign() != Any &&
         (((dcl->getSubRegAlign() * 2) >= alignByte &&
           (dcl->getSubRegAlign() * 2) % alignByte != 0) ||
@@ -187,7 +189,9 @@ bool IR_Builder::isGRFDstAligned(G4_Operand* opnd, int alignByte) const
   }
 
   if (dcl && dcl->getRegVar() && dcl->getRegVar()->isPhyRegAssigned()) {
-    offset += static_cast<unsigned short>(dcl->getRegVar()->getByteAddr(*this));
+    // For preRA ACC sub, if the variable is assigned with register already,
+    // don't put it in the candidate of ACC.
+    return false;
   }
 
   if (!isAligned) {
@@ -1906,6 +1910,24 @@ G4_INST *IR_Builder::createInternalBfnInst(
                           src1, src2, options, false);
 
   return ii;
+}
+
+bool IR_Builder::isBuiltinSendIndirectS0(G4_Operand *op) const
+{
+  const G4_Declare *d = op->getTopDcl();
+  if (d == nullptr || d->getRegFile() != G4_SCALAR)
+    return false;
+  unsigned rightBound = 0;
+  if (op->isDstRegRegion()) {
+    G4_DstRegRegion *dst = op->asDstRegRegion();
+    rightBound = dst->getRightBound();
+  } else if (op->isSrcRegRegion()) {
+    G4_SrcRegRegion *dst = op->asSrcRegRegion();
+    rightBound = dst->getRightBound();
+  } else {
+    return false;
+  }
+  return rightBound < 8 * FIRST_SURFACE_S0_QW;
 }
 
 // scratch surfaces, write the content of T251 to extended message descriptor

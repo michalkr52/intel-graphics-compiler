@@ -517,10 +517,11 @@ bool SOALayoutChecker::checkUsers(Instruction &I) {
 }
 
 bool SOALayoutChecker::visitBitCastInst(BitCastInst &BI) {
-  if (BI.use_empty() || IsBitCastForLifetimeMark(&BI)) {
+  // no sense in comparing pointer base types on opaque pointers
+  if (BI.use_empty() || IsBitCastForLifetimeMark(&BI) || AreOpaquePointersEnabled()) {
     return true;
   }
-
+  // FIXME: remove this once we only support opaque pointers
   Type *baseT = GetBaseType(IGCLLVM::getNonOpaquePtrEltTy(BI.getType()), true);
   Type *sourceType = GetBaseType(IGCLLVM::getNonOpaquePtrEltTy(BI.getOperand(0)->getType()), true);
   if (baseT->isStructTy() || sourceType->isStructTy()) {
@@ -554,62 +555,61 @@ bool SOALayoutChecker::visitIntrinsicInst(IntrinsicInst &II) {
   return IID == llvm::Intrinsic::lifetime_start || IID == llvm::Intrinsic::lifetime_end;
 }
 
-// Detection of mismatch between type sizes of
-// alloca -> load / store
-// or
-// alloca -> gep -> load / store
+// Detect size mismatches between an alloca's element and the corresponding load/store element (directly or via a GEP).
+// Return true to disable SOA promotion.
 bool IGC::SOALayoutChecker::MismatchDetected(Instruction &I) {
-
-  if (!isa<LoadInst>(I) && !isa<StoreInst>(I))
-    return false;
-
-  // Only detect mismatch if are have opaque pointers (LLVM>=16)
-  if (!IGC::AreOpaquePointersEnabled())
-    return false;
-
-  if (!pInfo->baseType)
-    return false;
-
   Type *allocaTy = allocaRef.getAllocatedType();
   bool allocaIsVecOrArr = allocaTy->isVectorTy() || allocaTy->isArrayTy();
-
   if (!allocaIsVecOrArr)
     return false;
 
-  bool useOldAlgorithm = !useNewAlgo(pInfo->baseType);
+  // Compute allocaEltTy early because we might need it to check for non-promoted type GEPs
+  Type *allocaEltTy = nullptr;
+  if (auto *arrTy = dyn_cast<ArrayType>(allocaTy))
+    allocaEltTy = arrTy->getElementType();
+  else if (auto *vec = dyn_cast<IGCLLVM::FixedVectorType>(allocaTy))
+    allocaEltTy = vec->getElementType();
 
-  if (useOldAlgorithm) {
-    auto DL = I.getParent()->getParent()->getParent()->getDataLayout();
-
-    Type *pUserTy = I.getType();
-
-    if (auto *storeInst = dyn_cast<StoreInst>(&I))
-      pUserTy = storeInst->getValueOperand()->getType();
-
-    if (auto *pgep = dyn_cast<GetElementPtrInst>(parentLevelInst)) {
-      allocaTy = pgep->getResultElementType();
-    } else {
-      if (auto *arrTy = dyn_cast<ArrayType>(allocaTy)) {
-        allocaTy = arrTy->getElementType();
-      } else if (auto *vec = dyn_cast<IGCLLVM::FixedVectorType>(allocaTy)) {
-        allocaTy = vec->getElementType();
+  // Skip when we see a non-promoted type GEP with a non-constant (dynamic) byte offset. The legacy (old) algorithm
+  // assumes byte offsets map exactly to whole promoted elements (e.g. multiples of the lane size) and cannot safely
+  // reconstruct sub‑element (inter-lane or unaligned) accesses. Using it would risk incorrect indexing. The new
+  // byte-precise algorithm could handle this, but while it is disabled we treat such dynamic non-promoted type GEPs as
+  // a mismatch and leave them untouched.
+  if (allocaEltTy) {
+    for (User *U : allocaRef.users()) {
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
+        auto allocaSize = allocaEltTy->getScalarSizeInBits();
+        auto gepSize = GEP->getSourceElementType()->getScalarSizeInBits();
+        if (allocaSize != gepSize && GEP->getNumOperands() > 1 && !isa<ConstantInt>(GEP->getOperand(1))) {
+          pInfo->canUseSOALayout = false;
+          return true;
+        }
       }
-
-      if (auto *arrTy = dyn_cast<ArrayType>(pUserTy)) {
-        pUserTy = arrTy->getElementType();
-      } else if (auto *vec = dyn_cast<IGCLLVM::FixedVectorType>(pUserTy)) {
-        pUserTy = vec->getElementType();
-      }
-    }
-
-    auto allocaSize = DL.getTypeAllocSize(allocaTy);
-    auto vecTySize = DL.getTypeAllocSize(pUserTy);
-
-    if (vecTySize != allocaSize) {
-      pInfo->canUseSOALayout = false;
-      return true;
     }
   }
+
+  // if it's a GEP, we're actually interested in it's element type
+  if (auto *pgep = dyn_cast<GetElementPtrInst>(parentLevelInst))
+    allocaEltTy = pgep->getResultElementType();
+
+  IGC_ASSERT(allocaEltTy);
+
+  Type *pUserTy = nullptr;
+  if (auto *storeInst = dyn_cast<StoreInst>(&I))
+    pUserTy = storeInst->getValueOperand()->getType();
+  else if (auto *loadInst = dyn_cast<LoadInst>(&I))
+    pUserTy = loadInst->getType();
+  else
+    return false;
+
+  auto allocaSize = allocaEltTy->getScalarSizeInBits();
+  auto vecTySize = pUserTy->getScalarSizeInBits();
+
+  if (vecTySize != allocaSize) {
+    pInfo->canUseSOALayout = false;
+    return true;
+  }
+
   return false;
 }
 
@@ -713,9 +713,6 @@ void LowerGEPForPrivMem::visitAllocaInst(AllocaInst &I) {
   IGC_ASSERT(I.getType()->getAddressSpace() == ADDRESS_SPACE_PRIVATE);
 
   StatusPrivArr2Reg status = CheckIfAllocaPromotable(&I);
-  if (I.getType()->getAddressSpace() == ADDRESS_SPACE_PRIVATE) {
-    m_ctx->metrics.CollectMem2Reg(&I, status);
-  }
   if (status != StatusPrivArr2Reg::OK) {
     MarkNotPromtedAllocas(I, status);
     // alloca size extends remain per-lane-reg space
@@ -755,7 +752,15 @@ public:
   AllocaInst *pVecAlloca;
   // location of lifetime starts
   llvm::SmallPtrSet<Instruction *, 4> pStartPoints;
-  TransposeHelperPromote(AllocaInst *pAI, const DataLayout &DL) : TransposeHelper(DL, false) { pVecAlloca = pAI; }
+  TransposeHelperPromote(AllocaInst *pAI, const DataLayout &DL) : TransposeHelper(DL, false) {
+    pVecAlloca = pAI;
+    // Determine promoted lane scalar type and record its size in bytes so that
+    // GEP indexing through reinterpreted vectors can advance the scalarized
+    // index in units of promoted lanes rather than the smaller vector elements.
+    llvm::Type *AllocTy = pAI->getAllocatedType();
+    llvm::Type *LaneTy = AllocTy->isVectorTy() ? cast<IGCLLVM::FixedVectorType>(AllocTy)->getElementType() : AllocTy;
+    m_promotedLaneBytes = (uint32_t)DL.getTypeAllocSize(LaneTy);
+  }
 };
 
 void LowerGEPForPrivMem::handleAllocaInst(llvm::AllocaInst *pAlloca) {
@@ -814,7 +819,15 @@ std::pair<unsigned int, Type *> TransposeHelper::getArrSizeAndEltType(Type *T) {
       auto *vTy = cast<IGCLLVM::FixedVectorType>(T);
       unsigned int vector_size_in_bytes = int_cast<unsigned int>(m_DL.getTypeAllocSize(T));
       unsigned int elt_size_in_bytes = int_cast<unsigned int>(m_DL.getTypeAllocSize(vTy->getElementType()));
-      arr_sz = vector_size_in_bytes / elt_size_in_bytes;
+      // If the vector is a reinterpret of the promoted storage (its element size
+      // differs from the promoted lane size), advance the scalarized index in
+      // units of promoted lanes, not in units of the smaller vector elements.
+      if (m_promotedLaneBytes != 0 && m_promotedLaneBytes != elt_size_in_bytes &&
+          (vector_size_in_bytes % m_promotedLaneBytes) == 0) {
+        arr_sz = vector_size_in_bytes / m_promotedLaneBytes;
+      } else {
+        arr_sz = vector_size_in_bytes / elt_size_in_bytes;
+      }
     }
     retTy = cast<VectorType>(T)->getElementType();
   } else {

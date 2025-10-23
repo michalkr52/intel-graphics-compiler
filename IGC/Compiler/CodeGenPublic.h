@@ -54,7 +54,6 @@ SPDX-License-Identifier: MIT
 #include <unordered_set>
 #include "Probe/Assertion.h"
 #include <optional>
-#include <Metrics/IGCMetric.h>
 #include "llvmWrapper/IR/Module.h"
 #include "Compiler/UserAddrSpaceMD.hpp"
 
@@ -487,6 +486,10 @@ struct SBindlessProgram : SKernelProgram {
   // a collection of other names that they go by.
   std::vector<std::string> Aliases;
 
+  // if the shader was created by cloning another shader
+  // this will contain the name of the original shader
+  std::string OriginatingShaderName;
+
   // We maintain this information to provide to GTPin. These are all
   // offsets in bytes from the base of GRF.
   uint32_t GlobalPtrOffset = 0; // pointer to RTGlobals
@@ -765,6 +768,11 @@ public:
   llvm::SmallVector<llvm::StructType *, 16> m_allLayoutStructTypes;
   void AddRef();
   void Release();
+
+  // TODO: Remove after switch to LLVM 16 opque pointers.
+  // In order to get rid of `Reapply_hasSetOpaquePointersValue.patch` patch, we're implementing
+  // check if pointer type was set in IGC.
+  bool IGC_IsPointerModeAlreadySet = false;
 };
 
 struct RoutingIndex {
@@ -835,8 +843,6 @@ public:
   llvm::AssemblyAnnotationWriter *annotater = nullptr;
 
   RetryManager m_retryManager;
-
-  IGCMetrics::IGCMetric metrics;
 
   // Used scratch space for private variables
   llvm::DenseMap<llvm::Function *, uint64_t> m_ScratchSpaceUsage;
@@ -1019,7 +1025,7 @@ public:
   inline const std::string GetErrorAndWarning() { return GetWarning() + GetError(); }
 
   CompOptions &getCompilerOption();
-  virtual void resetOnRetry();
+  virtual void resetOnRetry(bool isSubmodule = false);
   virtual int32_t getNumThreadsPerEU() const;
   virtual uint32_t getExpGRFSize() const;
   virtual uint32_t getNumGRFPerThread(bool returnDefault = true);
