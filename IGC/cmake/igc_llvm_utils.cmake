@@ -103,6 +103,7 @@ function(igc_add_lit_target target binary_dir comment)
     list(APPEND LIT_ARGS --param build_mode=${CMAKE_CFG_INTDIR})
   endif ()
 
+  list(APPEND LIT_ARGS --verbose --succinct)
   list(APPEND LIT_ARGS ${ARG_EXTRA})
   # Get the path to the lit to *run* tests with.  This can be overriden by
   # the user by specifying -DLLVM_EXTERNAL_LIT=<path-to-lit.py>
